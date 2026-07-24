@@ -24,7 +24,7 @@ interface Cafe {
 interface Game {
   id: string;
   name: string;
-  pricing_type?: 'duration' | 'per_match';
+  billing_type?: 'duration' | 'match';
 }
 
 interface Session {
@@ -32,8 +32,8 @@ interface Session {
   station_id: string;
   game_id: string;
   worker_id: string;
-  player_count: number;
-  duration: '30min' | '1h' | 'per_match';
+  player_count: string;
+  duration: '30min' | '1h' | null;
   total_price: number;
   start_time: string;
   end_time?: string | null;
@@ -59,7 +59,7 @@ export default function SessionsPage() {
   const [stationError, setStationError] = useState<string | null>(null);
   const [selectedStation, setSelectedStation] = useState<string>('');
   const [selectedGame, setSelectedGame] = useState<string>('');
-  const [playerCount, setPlayerCount] = useState(2);
+  const [playerCount, setPlayerCount] = useState<string>('2');
   const [duration, setDuration] = useState<'30min' | '1h'>('30min');
   const [showSuccess, setShowSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +71,7 @@ export default function SessionsPage() {
     setSelectedStation(stationId);
     // Reset other fields
     setSelectedGame('');
-    setPlayerCount(2);
+    setPlayerCount('2');
     setDuration('30min');
     setError(null);
     setIsModalOpen(true);
@@ -98,7 +98,7 @@ export default function SessionsPage() {
     const interval = setInterval(() => {
       const newTimers: Record<string, { remaining: number; total: number }> = {};
       sessions.forEach(session => {
-        if (session.status === 'active' && session.duration !== 'per_match' && session.start_time) {
+        if (session.status === 'active' && session.duration !== null && session.start_time) {
           const startTime = new Date(session.start_time).getTime();
           const durationMs = session.duration === '30min' ? 30 * 60 * 1000 : 60 * 60 * 1000;
           const elapsed = Date.now() - startTime;
@@ -120,7 +120,12 @@ export default function SessionsPage() {
     ]);
     setStations(stationsRes.data || []);
     setGames(gamesRes.data || []);
-    setSessions(sessionsRes.data || []);
+    // Convert player_count to string if it's number
+    const sessionsData = sessionsRes.data?.map(session => ({
+      ...session,
+      player_count: String(session.player_count)
+    })) || [];
+    setSessions(sessionsData);
     setCafes(cafesRes.data || []);
   };
 
@@ -223,7 +228,7 @@ export default function SessionsPage() {
 
   // Determine pricing type for the currently selected game
   const selectedGameObj = games.find(g => g.id === selectedGame);
-  const isPerMatch = selectedGameObj?.pricing_type === 'per_match';
+  const isPerMatch = selectedGameObj?.billing_type === 'match';
 
   // Recompute estimated price whenever game, players, duration, pricing type or selected station changes
   useEffect(() => {
@@ -240,20 +245,19 @@ export default function SessionsPage() {
       // Get station type from selected station
       const station = stations.find(s => s.id === selectedStation);
       const stationType = station?.type || 'ps5';
-      // For duration-based pricing, ignore player count in price lookup (or use fixed value)
-      const pricePlayerCount = game.pricing_type === 'per_match' ? String(playerCount) : '2';
-      const dur = game.pricing_type === 'per_match' ? 'per_match' : duration;
-      const price = await getGamePrice(game.name, pricePlayerCount, dur, stationType);
+      // For duration-based pricing, use selected player count
+      const dur = game.billing_type === 'match' ? 'per_match' : duration;
+      const price = await getGamePrice(game.name, playerCount, dur, stationType);
       if (price !== null) {
         setEstimatedPrice(Number(price));
         return;
       }
       // Fallback price logic (PS5 prices are base, PS4 are slightly lower)
       const baseMultiplier = stationType === 'ps4' ? 0.8 : 1;
-      if (game.pricing_type === 'per_match') {
-        setEstimatedPrice(Math.round((playerCount === 4 ? 8 : 5) * baseMultiplier * 100) / 100);
+      if (game.billing_type === 'match') {
+        setEstimatedPrice(Math.round(5 * baseMultiplier * 100) / 100);
       } else {
-        // Duration-based: fixed price, no player count multiplier
+        // Duration-based: fixed price
         const base = duration === '30min' ? 15 : 25;
         setEstimatedPrice(Math.round(base * baseMultiplier * 100) / 100);
       }
@@ -281,14 +285,6 @@ export default function SessionsPage() {
       setError('Veuillez sélectionner un jeu.');
       return;
     }
-    if (selectedGameObj?.pricing_type !== 'per_match' && (!playerCount || playerCount < 1 || playerCount > 2)) {
-      setError(`Veuillez sélectionner un nombre de joueurs entre 1 et 2 pour ${selectedGameObj?.name || 'ce jeu'}.`);
-      return;
-    }
-    if (!selectedGame) {
-      setError('Veuillez sélectionner un jeu.');
-      return;
-    }
 
     const station = stations.find(s => s.id === selectedStation);
     const game = games.find(g => g.id === selectedGame);
@@ -297,8 +293,7 @@ export default function SessionsPage() {
       return;
     }
 
-    const usePerMatch = game.pricing_type === 'per_match';
-    const finalDuration = usePerMatch ? 'per_match' : duration;
+    const usePerMatch = game.billing_type === 'match';
 
     const { data: inserted, error: insertError } = await insforge.database
       .from('sessions')
@@ -308,9 +303,9 @@ export default function SessionsPage() {
         worker_id: user.id,
         cafe_id: station?.cafe_id ?? user.cafeId ?? null,
         player_count: playerCount,
-        duration: finalDuration,
+        duration: usePerMatch ? null : duration,
         total_price: estimatedPrice,
-        match_count: usePerMatch ? 0 : 0,
+        match_count: usePerMatch ? 0 : null,
         start_time: new Date().toISOString(),
         status: 'active',
       }])
@@ -333,7 +328,7 @@ export default function SessionsPage() {
     setTimeout(() => setShowSuccess(false), 2000);
     setSelectedStation('');
     setSelectedGame('');
-    setPlayerCount(2);
+    setPlayerCount('2');
     setDuration('30min');
     setEstimatedPrice(0);
     loadData();
@@ -348,12 +343,11 @@ export default function SessionsPage() {
     // unit price for per_match
     const unitPrice = await getGamePrice(
       games.find(g => g.id === session.game_id)?.name || '',
-      String(session.player_count),
+      session.player_count,
       'per_match',
       stationType
     );
-    const baseMultiplier = stationType === 'ps4' ? 0.8 : 1;
-    const pricePerMatch = unitPrice ?? Math.round((session.player_count === 4 ? 8 : 5) * baseMultiplier * 100) / 100;
+    const pricePerMatch = unitPrice ?? 5;
     const newTotal = newMatchCount * pricePerMatch;
     await insforge.database.from('sessions').update({
       match_count: newMatchCount,
@@ -363,7 +357,7 @@ export default function SessionsPage() {
   };
 
   const handleProlongSession = async (session: Session) => {
-    if (session.duration === 'per_match') return;
+    if (session.duration === null) return;
     if (!confirm('Prolonger la session de 30 minutes supplémentaires ?')) return;
     const newPrice = Number(session.total_price) + 10;
     await insforge.database.from('sessions').update({
@@ -391,7 +385,7 @@ export default function SessionsPage() {
   };
 
   const renderTimer = (session: Session) => {
-    if (session.duration === 'per_match') {
+    if (session.duration === null) {
       return (
         <div className="text-center mb-4">
           <div className="inline-flex items-center justify-center w-24 h-24 rounded-full bg-gradient-to-br from-emerald-500 to-green-600 mb-2 shadow-lg shadow-emerald-900/40">
@@ -479,7 +473,7 @@ export default function SessionsPage() {
         {workerStations.map((station, index) => {
           const activeSession = sessions.find(s => s.station_id === station.id && s.status === 'active');
           const game = games.find(g => g.id === activeSession?.game_id);
-          const isMatchSession = activeSession?.duration === 'per_match';
+          const isMatchSession = activeSession?.duration === null;
 
           return (
             <motion.div
@@ -492,8 +486,8 @@ export default function SessionsPage() {
                 station.status === 'available'
                   ? 'bg-slate-800 border-cyan-500/50 shadow-lg shadow-cyan-900/20'
                   : station.status === 'occupied'
-                  ? 'bg-slate-800 border-violet-500/50 shadow-lg shadow-violet-900/20'
-                  : 'bg-slate-800 border-red-500/50 shadow-lg shadow-red-900/20'
+                    ? 'bg-slate-800 border-violet-500/50 shadow-lg shadow-violet-900/20'
+                    : 'bg-slate-800 border-red-500/50 shadow-lg shadow-red-900/20'
               }`}
             >
               <div className="flex justify-between items-start mb-4">
@@ -509,8 +503,8 @@ export default function SessionsPage() {
                   station.status === 'available'
                     ? 'bg-cyan-500/20 text-cyan-300'
                     : station.status === 'occupied'
-                    ? 'bg-violet-500/20 text-violet-300'
-                    : 'bg-red-500/20 text-red-300'
+                      ? 'bg-violet-500/20 text-violet-300'
+                      : 'bg-red-500/20 text-red-300'
                 }`}>
                   {station.status === 'available' ? 'Disponible' : station.status === 'occupied' ? 'Occupée' : 'Maintenance'}
                 </span>
@@ -522,11 +516,11 @@ export default function SessionsPage() {
                   <div className="space-y-2 text-center">
                     <h4 className="font-bold text-cyan-300">{game.name}</h4>
                     <div className="flex items-center justify-center gap-2 flex-wrap">
-                  <span className="px-2 py-1 bg-slate-700 rounded text-xs text-slate-300">VS {activeSession.player_count || '1'} JOUEURS</span>
-                  <span className="px-2 py-1 bg-slate-700 rounded text-xs text-slate-300">
-                    · {isMatchSession ? 'Par match' : activeSession.duration || (game?.pricing_type === 'per_match' ? 'Par match' : '30min')}
-                  </span>
-                </div>
+                      <span className="px-2 py-1 bg-slate-700 rounded text-xs text-slate-300">VS {activeSession.player_count || '1'} JOUEURS</span>
+                      <span className="px-2 py-1 bg-slate-700 rounded text-xs text-slate-300">
+                        · {isMatchSession ? 'Par match' : activeSession.duration || (game?.billing_type === 'match' ? 'Par match' : '30min')}
+                      </span>
+                    </div>
                     <p className="text-2xl font-bold text-cyan-300">
                       {Number(activeSession.total_price).toFixed(2)} {CURRENCY}
                     </p>
@@ -648,7 +642,7 @@ export default function SessionsPage() {
                   <option value="">Sélectionner un jeu</option>
                   {games.map(game => (
                     <option key={game.id} value={game.id}>
-                      {game.name} {game.pricing_type === 'per_match' ? '(par match)' : ''}
+                      {game.name} {game.billing_type === 'match' ? '(par match)' : ''}
                     </option>
                   ))}
                 </select>
@@ -658,11 +652,11 @@ export default function SessionsPage() {
                 <label className="block text-sm font-medium text-slate-300 mb-2">Joueurs</label>
                 <select
                   value={playerCount}
-                  onChange={(e) => setPlayerCount(Number(e.target.value))}
+                  onChange={(e) => setPlayerCount(e.target.value)}
                   className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-xl text-white focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                 >
-                  <option value={2}>2 Joueurs</option>
-                  <option value={4}>4 Joueurs</option>
+                  <option value="1">1 Joueur</option>
+                  <option value="2">2 Joueurs</option>
                 </select>
               </div>
 
